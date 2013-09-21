@@ -66,7 +66,8 @@ public class GerritApiUtil {
         HttpMethod method = null;
         try {
             method = doREST(host, login, password, path, requestBody, post);
-            String resp = method.getResponseBodyAsString();
+            String resp = removeGerritPrefix(method.getResponseBodyAsString());
+
             if (resp == null) {
                 LOG.info(String.format("Unexpectedly empty response: %s", resp));
                 return null;
@@ -77,6 +78,11 @@ public class GerritApiUtil {
                 method.releaseConnection();
             }
         }
+    }
+
+    private static String removeGerritPrefix(String responseBodyAsString) {
+        String jsonMagic = ")]}'\\n";
+        return responseBodyAsString.replace(jsonMagic, "");
     }
 
     @NotNull

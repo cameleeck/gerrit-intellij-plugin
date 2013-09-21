@@ -20,8 +20,11 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.intellij.icons.AllIcons;
+import com.intellij.notification.NotificationDisplayType;
+import com.intellij.notification.Notifications;
 import com.intellij.openapi.actionSystem.*;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.diff.DiffManager;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
@@ -44,6 +47,8 @@ import com.urswolfer.intellij.plugin.gerrit.rest.GerritApiUtil;
 import com.urswolfer.intellij.plugin.gerrit.rest.GerritUtil;
 import com.urswolfer.intellij.plugin.gerrit.rest.bean.ChangeInfo;
 import com.urswolfer.intellij.plugin.gerrit.ui.action.SettingsAction;
+import com.urswolfer.intellij.plugin.gerrit.ui.diff.CommentsDiffTool;
+import com.urswolfer.intellij.plugin.gerrit.util.GerritDataKeys;
 import git4idea.history.GitHistoryUtils;
 import git4idea.history.browser.GitCommit;
 import git4idea.history.browser.SymbolicRefs;
@@ -58,6 +63,7 @@ import java.util.concurrent.Callable;
 
 /**
  * @author Urs Wolfer
+ * @author Konrad Dobrzynski
  */
 public class GerritToolWindowFactory implements ToolWindowFactory {
     private GerritChangeListPanel changeListPanel;
@@ -66,15 +72,22 @@ public class GerritToolWindowFactory implements ToolWindowFactory {
     private Set<String> myNotifiedChanges = new HashSet<String>();
     private GerritChangeDetailsPanel myDetailsPanel;
     private Splitter myDetailsSplitter;
+    private ChangeInfo mySelectedChange;
+    private ReviewCommentSink myReviewCommentSink;
 
     public GerritToolWindowFactory() {
     }
 
     @Override
     public void createToolWindowContent(final Project project, ToolWindow toolWindow) {
+        Notifications.Bus.register(GerritNotificationConstant.ERROR_GROUP_ID, NotificationDisplayType.BALLOON);
+        DiffManager.getInstance().registerDiffTool(new CommentsDiffTool());
+
+        myReviewCommentSink = new ReviewCommentSink();
+
         Component component = toolWindow.getComponent();
 
-        changeListPanel = new GerritChangeListPanel(Lists.<ChangeInfo>newArrayList(), null);
+        changeListPanel = new GerritChangeListPanel(Lists.<ChangeInfo>newArrayList(), null, myReviewCommentSink);
 
         SimpleToolWindowPanel panel = new SimpleToolWindowPanel(false, true);
 
@@ -112,7 +125,14 @@ public class GerritToolWindowFactory implements ToolWindowFactory {
     private RepositoryChangesBrowser createRepositoryChangesBrowser(final Project project) {
         TableView<ChangeInfo> table = changeListPanel.getTable();
 
-        RepositoryChangesBrowser repositoryChangesBrowser = new RepositoryChangesBrowser(project, Collections.<CommittedChangeList>emptyList(), Collections.<Change>emptyList(), null);
+        RepositoryChangesBrowser repositoryChangesBrowser = new RepositoryChangesBrowser(project, Collections.<CommittedChangeList>emptyList(), Collections.<Change>emptyList(), null) {
+            @Override
+            public void calcData(DataKey key, DataSink sink) {
+                super.calcData(key, sink);
+                sink.put(GerritDataKeys.CHANGE, mySelectedChange);
+                sink.put(GerritDataKeys.REVIEW_COMMENT_SINK, myReviewCommentSink);
+            }
+        };
         repositoryChangesBrowser.getDiffAction().registerCustomShortcutSet(CommonShortcuts.getDiff(), table);
         repositoryChangesBrowser.getViewer().setScrollPaneBorder(IdeBorderFactory.createBorder(SideBorder.LEFT | SideBorder.TOP));
 
@@ -120,6 +140,7 @@ public class GerritToolWindowFactory implements ToolWindowFactory {
             @Override
             public void consume(ChangeInfo changeInfo) {
                 changeSelected(changeInfo, project);
+                mySelectedChange = changeInfo;
             }
         });
         return repositoryChangesBrowser;
@@ -200,7 +221,7 @@ public class GerritToolWindowFactory implements ToolWindowFactory {
                 return Collections.emptyList();
             }
         }
-        return GerritUtil.getChanges(apiUrl, settings.getLogin(), settings.getPassword());
+        return GerritUtil.getChangesForProject(apiUrl, settings.getLogin(), settings.getPassword(), project);
     }
 
     private ActionToolbar createToolbar() {

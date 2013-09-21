@@ -17,13 +17,20 @@
 
 package com.urswolfer.intellij.plugin.gerrit.rest;
 
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.intellij.idea.ActionsBundle;
 import com.intellij.notification.Notification;
+import com.intellij.notification.NotificationListener;
 import com.intellij.notification.NotificationType;
+import com.intellij.notification.Notifications;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.options.ShowSettingsUtil;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
@@ -33,13 +40,18 @@ import com.intellij.openapi.util.ThrowableComputable;
 import com.intellij.openapi.util.text.StringUtil;
 import com.urswolfer.intellij.plugin.gerrit.GerritSettings;
 import com.urswolfer.intellij.plugin.gerrit.rest.bean.*;
+import com.urswolfer.intellij.plugin.gerrit.ui.GerritNotificationConstant;
 import com.urswolfer.intellij.plugin.gerrit.ui.LoginDialog;
+import git4idea.GitUtil;
 import git4idea.config.GitVcsApplicationSettings;
 import git4idea.config.GitVersion;
 import git4idea.i18n.GitBundle;
+import git4idea.repo.GitRemote;
+import git4idea.repo.GitRepository;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.swing.event.HyperlinkEvent;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -48,6 +60,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * Parts based on org.jetbrains.plugins.github.GithubUtil
  *
  * @author Urs Wolfer
+ * @author Konrad Dobrzynski
  */
 public class GerritUtil {
 
@@ -60,15 +73,13 @@ public class GerritUtil {
                                                         @NotNull final ThrowableComputable<T, IOException> computable) throws IOException {
         try {
             return doAccessToGerritWithModalProgress(project, computable);
-        }
-        catch (IOException e) {
+        } catch (IOException e) {
             SslSupport sslSupport = SslSupport.getInstance();
             if (SslSupport.isCertificateException(e)) {
                 if (sslSupport.askIfShouldProceed(host)) {
                     // retry with the host being already trusted
                     return doAccessToGerritWithModalProgress(project, computable);
-                }
-                else {
+                } else {
                     return null;
                 }
             }
@@ -84,8 +95,7 @@ public class GerritUtil {
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
                     result.set(computable.compute());
-                }
-                catch (IOException e) {
+                } catch (IOException e) {
                     exception.set(e);
                 }
             }
@@ -127,6 +137,46 @@ public class GerritUtil {
     @NotNull
     public static List<ChangeInfo> getChangesToReview(@NotNull String url, @NotNull String login, @NotNull String password) {
         return getChanges(url, login, password, "?q=is:open+reviewer:self");
+    }
+
+    /**
+     * Provide information only for current project
+     */
+    @NotNull
+    public static List<ChangeInfo> getChangesForProject(@NotNull String url, @NotNull String login, @NotNull String password, @NotNull final Project project) {
+        String projectName = "";
+        List<GitRepository> repositories = GitUtil.getRepositoryManager(project).getRepositories();
+        if (repositories.isEmpty()) {
+            //Show notification
+            showAddGitRepositoryNotification(project);
+            return Lists.newArrayList();
+        }
+
+        GitRemote gitRemote = Iterables.getFirst(repositories.get(0).getRemotes(), null);
+        if (gitRemote == null) {
+            notifyError(project, "Don't have remote to fetch", "Git repository don't have any remote. <br/> Please add one and try again.");
+            return Lists.newArrayList();
+        }
+        for (String repositoryUrl : gitRemote.getUrls()) {
+            if (repositoryUrl.contains(url)) {
+                projectName = repositoryUrl.replace(url + "/", "");
+            }
+        }
+        return getChanges(url, login, password, "?q=is:open+project:" + projectName);
+    }
+
+    @NotNull
+    public static void showAddGitRepositoryNotification(final Project project) {
+        Notifications.Bus.notify(new Notification(GerritNotificationConstant.ERROR_GROUP_ID, "Insufficient dependencies", "Please add git repository <br/> <a href='vcs'>Add vcs root</a>", NotificationType.WARNING, new NotificationListener() {
+            @Override
+            public void hyperlinkUpdate(@NotNull Notification notification, @NotNull HyperlinkEvent event) {
+                if (event.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
+                    if (event.getDescription().equals("vcs")) {
+                        ShowSettingsUtil.getInstance().showSettingsDialog(project, ActionsBundle.message("group.VcsGroup.text"));
+                    }
+                }
+            }
+        }));
     }
 
     @NotNull
@@ -177,10 +227,59 @@ public class GerritUtil {
 
     @NotNull
     private static ChangeInfo parseSingleChangeInfos(@NotNull JsonObject result) {
-        final Gson gson = new GsonBuilder()
+        final Gson gson = createGson();
+        return gson.fromJson(result, ChangeInfo.class);
+    }
+
+    /**
+     * Support starting from Gerrit 2.7.
+     */
+    @NotNull
+    public static TreeMap<String, List<CommentInfo>> getComments(@NotNull String url, @NotNull String login, @NotNull String password,
+                                                                 @NotNull String changeId, @NotNull String revision) {
+        final String request = "/a/changes/" + changeId + "/revisions/" + revision + "/comments/";
+        try {
+            JsonElement result = GerritApiUtil.getRequest(url, login, password, request);
+            if (result == null) {
+                return Maps.newTreeMap();
+            }
+            return parseCommentInfos(result);
+        } catch (NotFoundException e) {
+            LOG.warn("Failed to load comments; most probably because of too old Gerrit version (only 2.7 and newer supported). Returning empty.");
+            return Maps.newTreeMap();
+        } catch (IOException e) {
+            LOG.error(e);
+            return Maps.newTreeMap();
+        }
+    }
+
+    @NotNull
+    private static TreeMap<String, List<CommentInfo>> parseCommentInfos(@NotNull JsonElement result) {
+        TreeMap<String, List<CommentInfo>> commentInfos = Maps.newTreeMap();
+        final JsonObject jsonObject = result.getAsJsonObject();
+
+        for (Map.Entry<String, JsonElement> element : jsonObject.entrySet()) {
+            List<CommentInfo> currentCommentInfos = Lists.newArrayList();
+
+            for (JsonElement jsonElement : element.getValue().getAsJsonArray()) {
+                currentCommentInfos.add(parseSingleCommentInfos(jsonElement.getAsJsonObject()));
+            }
+
+            commentInfos.put(element.getKey(), currentCommentInfos);
+        }
+        return commentInfos;
+    }
+
+    @NotNull
+    private static CommentInfo parseSingleCommentInfos(@NotNull JsonObject result) {
+        final Gson gson = createGson();
+        return gson.fromJson(result, CommentInfo.class);
+    }
+
+    private static Gson createGson() {
+        return new GsonBuilder()
                 .setDateFormat("yyyy-MM-dd hh:mm:ss")
                 .create();
-        return gson.fromJson(result, ChangeInfo.class);
     }
 
     private static boolean testConnection(final String url, final String login, final String password) throws IOException {
@@ -190,7 +289,7 @@ public class GerritUtil {
 
     @Nullable
     private static AccountInfo retrieveCurrentUserInfo(@NotNull String url, @NotNull String login,
-                                                      @NotNull String password) throws IOException {
+                                                       @NotNull String password) throws IOException {
         JsonElement result = GerritApiUtil.getRequest(url, login, password, "/a/accounts/self");
         return parseUserInfo(result);
     }
@@ -218,8 +317,7 @@ public class GerritUtil {
                 return Collections.emptyList();
             }
             return parseProjectInfos(result);
-        }
-        catch (IOException e) {
+        } catch (IOException e) {
             LOG.error(e);
             return Collections.emptyList();
         }
@@ -247,14 +345,14 @@ public class GerritUtil {
 
     /**
      * Checks if user has set up correct user credentials for access in the settings.
+     *
      * @return true if we could successfully login with these credentials, false if authentication failed or in the case of some other error.
      */
     public static boolean checkCredentials(final Project project) {
         final GerritSettings settings = GerritSettings.getInstance();
         try {
             return checkCredentials(project, settings.getHost(), settings.getLogin(), settings.getPassword());
-        }
-        catch (IOException e) {
+        } catch (IOException e) {
             // this method is a quick-check if we've got valid user setup.
             // if an exception happens, we'll show the reason in the login dialog that will be shown right after checkCredentials failure.
             LOG.info(e);
@@ -263,7 +361,7 @@ public class GerritUtil {
     }
 
     public static boolean checkCredentials(Project project, final String url, final String login, final String password) throws IOException {
-        if (StringUtil.isEmptyOrSpaces(url) || StringUtil.isEmptyOrSpaces(login) || StringUtil.isEmptyOrSpaces(password)){
+        if (StringUtil.isEmptyOrSpaces(url) || StringUtil.isEmptyOrSpaces(login) || StringUtil.isEmptyOrSpaces(password)) {
             return false;
         }
         Boolean result = accessToGerritWithModalProgress(project, url, new ThrowableComputable<Boolean, IOException>() {
@@ -281,10 +379,10 @@ public class GerritUtil {
      */
     @Nullable
     public static List<ProjectInfo> getAvailableProjects(final Project project) throws IOException {
-        while (!checkCredentials(project)){
+        while (!checkCredentials(project)) {
             final LoginDialog dialog = new LoginDialog(project);
             dialog.show();
-            if (!dialog.isOK()){
+            if (!dialog.isOK()) {
                 return null;
             }
         }
@@ -302,9 +400,9 @@ public class GerritUtil {
 
     public static String getRef(ChangeInfo changeDetails) {
         String ref = null;
-        final TreeMap<String,RevisionInfo> revisions = changeDetails.getRevisions();
+        final TreeMap<String, RevisionInfo> revisions = changeDetails.getRevisions();
         for (RevisionInfo revisionInfo : revisions.values()) {
-            final TreeMap<String,FetchInfo> fetch = revisionInfo.getFetch();
+            final TreeMap<String, FetchInfo> fetch = revisionInfo.getFetch();
             for (FetchInfo fetchInfo : fetch.values()) {
                 ref = fetchInfo.getRef();
             }
