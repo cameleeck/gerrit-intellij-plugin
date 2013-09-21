@@ -41,7 +41,7 @@ import com.intellij.openapi.util.ThrowableComputable;
 import com.intellij.openapi.util.text.StringUtil;
 import com.urswolfer.intellij.plugin.gerrit.GerritSettings;
 import com.urswolfer.intellij.plugin.gerrit.rest.bean.*;
-import com.urswolfer.intellij.plugin.gerrit.ui.GerritNotificationConstant;
+import com.urswolfer.intellij.plugin.gerrit.ui.GerritApplicationConstant;
 import com.urswolfer.intellij.plugin.gerrit.ui.LoginDialog;
 import git4idea.GitUtil;
 import git4idea.config.GitVcsApplicationSettings;
@@ -53,7 +53,6 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.event.HyperlinkEvent;
-import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -66,8 +65,6 @@ import java.util.concurrent.atomic.AtomicReference;
 public class GerritUtil {
 
     public static final Logger LOG = Logger.getInstance("gerrit");
-
-    static final String GERRIT_NOTIFICATION_GROUP = "gerrit";
 
     @Nullable
     public static <T> T accessToGerritWithModalProgress(@NotNull final Project project, @NotNull String host,
@@ -160,7 +157,7 @@ public class GerritUtil {
     }
 
     public static void showAddGitRepositoryNotification(final Project project) {
-        Notifications.Bus.notify(new Notification(GerritNotificationConstant.ERROR_GROUP_ID, "Insufficient dependencies", "Please add git repository <br/> <a href='vcs'>Add vcs root</a>", NotificationType.WARNING, new NotificationListener() {
+        Notifications.Bus.notify(new Notification(GerritApplicationConstant.GERRIT_NOTIFICATION_GROUP, "Insufficient dependencies", "Please add git repository <br/> <a href='vcs'>Add vcs root</a>", NotificationType.WARNING, new NotificationListener() {
             @Override
             public void hyperlinkUpdate(@NotNull Notification notification, @NotNull HyperlinkEvent event) {
                 if (event.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
@@ -419,6 +416,6 @@ public class GerritUtil {
     }
 
     private static void notify(@NotNull Project project, @NotNull String title, @NotNull String message, @NotNull NotificationType notificationType) {
-        new Notification(GERRIT_NOTIFICATION_GROUP, title, message, notificationType).notify(project);
+        new Notification(GerritApplicationConstant.GERRIT_NOTIFICATION_GROUP, title, message, notificationType).notify(project);
     }
 }
